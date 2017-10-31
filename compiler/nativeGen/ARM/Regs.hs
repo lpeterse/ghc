@@ -36,8 +36,7 @@ data Address
   | PostIndexedImmediate  Rn ImmOffset
 
 data Imm
-  = ImmInt        Int
-  | ImmFIXME      -- FIXME
+  = ImmNumericConstant Word32
 
 data RegOffset
   = PlusReg Reg
@@ -84,3 +83,7 @@ pc      = r15
 -- of logical an arithmetic operations.
 cpsr   :: Reg
 cpsr    = regSingle 9999 -- doesn't have a number in specification
+
+litToImm :: CmmLit -> Imm
+litToImm (CmmInt i w) = ImmInteger (narrowS w i)
+litToImm _            = panic "ARM.Regs.litToImm: no match"
