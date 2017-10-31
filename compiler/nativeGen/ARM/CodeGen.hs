@@ -61,8 +61,8 @@ data Amode
 --   otherwise, it comes out as @Any@, and the parent can decide which
 --   register to put it in.
 data Register
-  = Fixed Reg InstrBlock
-  | Any   (Reg -> InstrBlock)
+  = Fixed Format Reg InstrBlock
+  | Any   Format (Reg -> InstrBlock)
 
 -- | Make code to evaluate a 32 bit expression.
 getRegister :: CmmExpr -> NatM Register
@@ -74,12 +74,27 @@ getRegister expr = case expr of
   -- entry in the lit pool.
   CmmLit lit ->
     return $ Any $ \dst-> unitOL $ LDR' dst (litToImm lit)
-  --
-  CmmReg reg -> case reg of
-    CmmLocal (LocalReg uniq cmmType) ->
-      undefined
-    CmmGlobal _ ->
-      undefined
+  -- Map and return the given register.
+  -- TODO: This is the easiest implementation taken from SPARC.
+  --       Is this correct? Other arches handle PicBaseReg etc.
+  CmmReg reg -> do
+    dflags <- getDynFlags
+    let platform = targetPlatform dflags
+    return $ Fixed (cmmTypeFormat $ cmmRegType dflags reg)
+                   (getRegisterReg platform reg) nilOL
+  where
+    -- | Get the corresponding machine register for a cmm register.
+    --   Local registers are mapped to virtual registers.
+    --   Global register mapping is defined in `includes/CodeGen.Platform.hs`.
+    getRegisterReg :: Platform -> CmmReg -> Reg
+    getRegisterReg _ (CmmLocal (LocalReg u pk)) =
+      RegVirtual $ mkVirtualReg u (cmmTypeFormat pk)
+    getRegisterReg platform (CmmGlobal mid) =
+      case globalRegMaybe platform mid of
+        Just reg -> RegReal reg
+        Nothing  -> pprPanic
+                      "ARM.CodeGen.getRegisterReg: global is in memory"
+                      (ppr $ CmmGlobal mid)
 
 -- | Compute an expression into a register, but
 --   we don't mind which one it is.
