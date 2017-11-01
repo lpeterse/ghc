@@ -71,9 +71,19 @@ getRegister expr = case expr of
   -- constant expression (i.e. `LDR rd, =0x123`).
   -- The arm assembler decides based on size whether
   -- it can be done via MOV or requires an LDR and
-  -- entry in the lit pool.
-  CmmLit lit ->
-    return $ Any $ \dst-> unitOL $ LDR' dst (litToImm lit)
+  -- an entry in the lit pool.
+  CmmLit lit -> do
+    let code dst = unitOL $ LDR' dst (litToImm lit)
+    return $ Any format code
+  -- Compute an inner expression representing
+  -- a memory address and then load from this address.
+  -- The code for the computation of the inner
+  -- address is prepended to the load instruction.
+  CmmLoad mem pk -> do
+    Amode addr code <- getAmode mem
+    let format = cmmTypeFormat pk
+    let code' dst = code `snocOL` LDR AL dst addr
+    return $ Any format code'
   -- Map and return the given register.
   -- TODO: This is the easiest implementation taken from SPARC.
   --       Is this correct? Other arches handle PicBaseReg etc.
@@ -82,6 +92,17 @@ getRegister expr = case expr of
     let platform = targetPlatform dflags
     return $ Fixed (cmmTypeFormat $ cmmRegType dflags reg)
                    (getRegisterReg platform reg) nilOL
+  -- TODO: How does it work?
+  CmmRegOff {} -> do
+    dflags <- getDynFlags
+    getRegister (mangleIndexTree dflags expr)
+  --
+  CmmMachOp op exprs ->
+    getRegisterForMachOp op exprs
+  -- This one is not implemented (at least in PPC).
+  -- TODO: What shall be done here?
+  CmmStackSlot {} ->
+    panic "ARM.CodeGen.getRegister: CmmStackSlot not implemented"
   where
     -- | Get the corresponding machine register for a cmm register.
     --   Local registers are mapped to virtual registers.
@@ -92,9 +113,242 @@ getRegister expr = case expr of
     getRegisterReg platform (CmmGlobal mid) =
       case globalRegMaybe platform mid of
         Just reg -> RegReal reg
-        Nothing  -> pprPanic
-                      "ARM.CodeGen.getRegisterReg: global is in memory"
-                      (ppr $ CmmGlobal mid)
+        Nothing  -> panic "ARM.CodeGen.getRegisterReg: global is in memory"
+    -- TODO: What does it do?
+    mangleIndexTree :: DynFlags -> CmmExpr -> CmmExpr
+    mangleIndexTree dflags (CmmRegOff reg off) =
+      CmmMachOp (MO_Add width)
+                [CmmReg reg, CmmLit (CmmInt (fromIntegral off) width)]
+      where
+        width = typeWidth (cmmRegType dflags reg)
+
+getRegisterMachOp :: MachOp -> [CmmExpr] -> NatM Register
+getRegisterMachOp op params = case op of
+  -----------------------------------------------------------------------------
+  -- Integer operations (insensitive to signed/unsigned).
+  -----------------------------------------------------------------------------
+
+  MO_Add w -> binary w $ \rd rn rm->
+    [ ADD AL rd rn (Op2 rm) ]
+
+  MO_Sub w -> binary w $ \rd rn rm->
+    [ SUB AL rd rn (Op2 rm) ]
+
+  MO_Mul w -> binary w $ \rd rn rm->
+    [ MUL AL rd rn (Op2 rm) ]
+
+  MO_Eq  w -> binary w $ \rd rn rm->
+    [ TEQ rn rm, LDR' EQ rd (ImmInt 1) ]
+
+  MO_Ne  w -> binary w $ \rd rn rm->
+    [ TEQ rn rm, LDR' EQ rd (ImmInt 1) ]
+
+  -----------------------------------------------------------------------------
+  -- Bitwise operations.  Not all of these may be supported
+  -- at all sizes, and only integral ws are valid.
+  -----------------------------------------------------------------------------
+
+  MO_And   w -> binary w $ \rd rn rm->
+    [ AND AL rd rn (Op2 rm) ]
+
+  MO_Or    w -> binary w $ \rd rn rm->
+    [ OR AL rd rn (Op2 rm) ]
+
+  MO_Xor   w -> binary w $ \rd rn rm->
+    [ EOR AL rd rn (Op2 rm) ]
+
+  MO_Not   w -> unary w $ \rd rn->
+    [ NEG AL rd rn ]
+
+  MO_Shl   w -> binary w $ \rd rn rm->
+    [ AND AL rd rn (Op2 rm) ]
+
+  MO_U_Shr w -> binary w $ \rd rn rm->
+    [ AND AL rd rn (Op2 rm) ]
+
+  MO_S_Shr w -> binary w $ \rd rn rm->
+    [ AND AL rd rn (Op2 rm) ]
+
+  -----------------------------------------------------------------------------
+  -- Signed multiply/divide.
+  -----------------------------------------------------------------------------
+
+  MO_S_MulMayOflo w -> binary w $ \rd rn rm->
+    [ MUL AL rd rn (Op2 rm) ]
+
+  -- FIXME: What about div by zero?
+  MO_S_Quot w -> binary w $ \rd rn rm->
+    [ SDIV AL rd rn (Op2 rm) ]
+
+  MO_S_Rem w -> binary w $ \rd rn rm->
+    [ SDIV AL rd rn (Op2 rm)   -- rd := rn / rm
+    , MUL  AL rd rm (Op2 rd)   -- rd := rm * rd
+    , SUB  AL rd rn (Op2 rd) ] -- rd := rn - rd
+
+  -----------------------------------------------------------------------------
+  -- Signed negate.
+  -----------------------------------------------------------------------------
+
+  MO_S_Neg w -> unary w $ \rd rn->
+    [ NEG  AL rd rn
+    , ADD  AL rd rd (Op2' $ ImmInt 1) ]
+
+  -----------------------------------------------------------------------------
+  -- Unsigned multiply/divide.
+  -----------------------------------------------------------------------------
+
+  MO_U_MulMayOflo w -> binary w $ \rd rn rm->
+    [ MUL AL rd rn (Op2 rm) ]
+
+  MO_U_Quot w -> binary w $ \rd rn rm->
+    [ SDIV AL rd rn (Op2 rm) ]
+
+  MO_U_Rem w -> binary w $ \rd rn rm->
+    [ SDIV AL rd rn (Op2 rm)   -- rd := rn / rm
+    , MUL  AL rd rm (Op2 rd)   -- rd := rm * rd
+    , SUB  AL rd rn (Op2 rd) ] -- rd := rn - rd
+
+  -----------------------------------------------------------------------------
+  -- Signed comparisons.
+  -----------------------------------------------------------------------------
+
+  MO_S_Ge w -> binary w $ \rd rn rm->
+    [ CMP  AL rn (Op2 rm)
+    , LDR' GE rd (ImmInt 1) ]
+
+  MO_S_Le w -> binary w $ \rd rn rm->
+    [ CMP  AL rn (Op2 rm)
+    , LDR' LE rd (ImmInt 1) ]
+
+  MO_S_Gt w -> binary w $ \rd rn rm->
+    [ CMP  AL rn (Op2 rm)
+    , LDR' GT rd (ImmInt 1) ]
+
+  MO_S_Lt w -> binary w $ \rd rn rm->
+    [ CMP  AL rn (Op2 rm)
+    , LDR' LT rd (ImmInt 1) ]
+
+  -----------------------------------------------------------------------------
+  -- Unsigned comparisons.
+  -----------------------------------------------------------------------------
+
+  MO_U_Ge w -> binary w $ \rd rn rm->
+    [ CMP  AL rn (Op2 rm)
+    , LDR' CS rd (ImmInt 1) ]
+
+  MO_U_Le w -> binary w $ \rd rn rm->
+    [ CMP  AL rn (Op2 rm)
+    , LDR' LS rd (ImmInt 1) ]
+
+  MO_U_Gt w  -> binary w $ \rd rn rm->
+    [ CMP  AL rn (Op2 rm)
+    , LDR' HI rd (ImmInt 1) ]
+
+  MO_U_Lt w -> binary w $ \rd rn rm->
+    [ CMP  AL rn (Op2 rm)
+    , LDR' CC rd (ImmInt 1) ]
+
+  -----------------------------------------------------------------------------
+  -- Floating point arithmetic.
+  -----------------------------------------------------------------------------
+
+  MO_F_Add  w -> binary w $ \fd fn fm->
+    [ VADD AL F32 fd fn fm ]
+
+  MO_F_Sub  w -> binary w $ \fd fn fm->
+    [ VSUB AL F32 fd fn fm ]
+
+  MO_F_Mul  w -> binary w $ \fd fn fm->
+    [ VMUL AL F32 fd fn fm ]
+
+  MO_F_Quot w -> binary w $ \fd fn fm->
+    [ VDIV AL F32 fd fn fm ]
+
+  MO_F_Neg  w -> unary w $ \fd fm->
+    [ VNEG AL F32 fd fm ]
+
+  -----------------------------------------------------------------------------
+  -- Floating point comparison.
+  -----------------------------------------------------------------------------
+
+  MO_F_Eq w -> binary w $ \rd fn fm->
+    [ VCMP AL F32 fn fm
+    , LDR' EQ rd (ImmInt 1) ]
+
+  MO_F_Ne w -> binary w $ \rd fn fm->
+    [ VCMP AL F32 fn fm
+    , LDR' NE rd (ImmInt 1) ]
+
+  MO_F_Ge w -> binary w $ \rd fn fm->
+    [ VCMP AL F32 fn fm
+    , LDR' GE rd (ImmInt 1) ]
+
+  MO_F_Le w -> binary w $ \rd fn fm->
+    [ VCMP AL F32 fn fm
+    , LDR' LE rd (ImmInt 1) ]
+
+  MO_F_Gt w -> binary w $ \rd fn fm->
+    [ VCMP AL F32 fn fm
+    , LDR' GT rd (ImmInt 1) ]
+
+  MO_F_Lt w -> binary w $ \rd fn fm->
+    [ VCMP AL F32 fn fm
+    , LDR' LT rd (ImmInt 1) ]
+
+  -----------------------------------------------------------------------------
+  -- Conversions.  Some of these will be NOPs.
+  -- Floating-point conversions use the signed variant.
+  -----------------------------------------------------------------------------
+
+  MO_SF_Conv w w         -> undefined
+  MO_FS_Conv w w         -> undefined
+  MO_SS_Conv w w         -> undefined
+  MO_UU_Conv w w         -> undefined
+  MO_FF_Conv w w         -> undefined
+
+  -- Vector element insertion and extraction operations
+  MO_V_Insert  Length w  -> undefined
+  MO_V_Extract Length w  -> undefined
+
+  -- Integer vector operations
+  MO_V_Add Length w      -> undefined
+  MO_V_Sub Length w      -> undefined
+  MO_V_Mul Length w      -> undefined
+
+  -- Signed vector multiply/divide
+  MO_VS_Quot Length w    -> undefined
+  MO_VS_Rem  Length w    -> undefined
+  MO_VS_Neg  Length w    -> undefined
+
+  -- Unsigned vector multiply/divide
+  MO_VU_Quot Length w    -> undefined
+  MO_VU_Rem  Length w    -> undefined
+
+  -- Floting point vector element insertion and extraction operations
+  MO_VF_Insert  Length w -> undefined
+  MO_VF_Extract Length w -> undefined
+
+  -- Floating point vector operations
+  MO_VF_Add  Length w    -> undefined
+  MO_VF_Sub  Length w    -> undefined
+  MO_VF_Neg  Length w    -> undefined
+  MO_VF_Mul  Length w    -> undefined
+  MO_VF_Quot Length w    -> undefined
+
+  -- Alignment check (for -falignment-sanitisation)
+  MO_AlignmentCheck i w  -> undefined
+  where
+    unary w f = case params of
+        [x] -> do
+          (rn, cn) <- getSomeReg x
+          return $ Any (intFormat w) (\rd-> cn <> toOL (f rd rn))
+        _ -> panic "ARM.CodeGen.getRegisterMachOp.unary: parameter mismatch"
+    binary w f = case params of
+      [x,y] -> do
+        (rn, cn) <- getSomeReg x
+        (rm, cm) <- getSomeReg y
+        return $ Any (intFormat w) (\rd-> cn <> cm <> toOL (f rd rn rm))
+      _ -> panic "ARM.CodeGen.getRegisterMachOp.binary: parameter mismatch"
 
 -- | Compute an expression into a register, but
 --   we don't mind which one it is.

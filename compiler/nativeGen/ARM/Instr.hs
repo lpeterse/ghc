@@ -80,46 +80,61 @@ type Rd       = Reg
 type Rn       = Reg
 type Rm       = Reg
 type Rs       = Reg
+type Fd       = Reg
+type Fn       = Reg
+type Fm       = Reg
 type Constant = Word32
+
+data Prec
+  = F32
+  | F64
 
 data Instr
   -- Loads and stores.
-  = LDR  Cond Rd Address
-  | LDR' Cond Rd Imm               -- Assembler creates MOV or LDR from lit pool
-  | LDRB Cond Rd Address
-  | STR  Cond Rd Address
-  | STRB Cond Rd Address
+  = LDR   Cond Rd Address
+  | LDR'  Cond Rd Imm               -- Assembler creates MOV or LDR from lit pool
+  | LDRB  Cond Rd Address
+  | STR   Cond Rd Address
+  | STRB  Cond Rd Address
   -- Arithmetic operations.
-  | ADD  Cond Rd Rn Op2            -- Rd := Rn + Op2
-  | ADC  Cond Rd Rn Op2            -- Rd := Rn + Op2 + Carry
-  | SUB  Cond Rd Rn Op2            -- Rd := Rn – Op2
-  | SBC  Cond Rd Rn Op2            -- Rd := Rn – Op2 – NOT(Carry)
-  | MUL  Cond Rd Rm Rs             -- Rd := (Rm * Rs)[31:0]
-  | SDIV Cond Rd Rn Rm             -- Rd := Rn / Rm
-  | UDIV Cond Rd Rn Rm             -- Rd := Rn / Rm
+  | ADD   Cond Rd Rn Op2            -- Rd := Rn + Op2
+  | ADC   Cond Rd Rn Op2            -- Rd := Rn + Op2 + Carry
+  | SUB   Cond Rd Rn Op2            -- Rd := Rn – Op2
+  | SBC   Cond Rd Rn Op2            -- Rd := Rn – Op2 – NOT(Carry)
+  | MUL   Cond Rd Rm Rs             -- Rd := (Rm * Rs)[31:0]
+  | SDIV  Cond Rd Rn Rm             -- Rd := Rn / Rm
+  | UDIV  Cond Rd Rn Rm             -- Rd := Rn / Rm
   -- Moves operations.
-  | MOV  Cond Rd    Op2            -- Rd := Op2
-  | MOVS Cond Rd    Op2            -- Rd := Op2
-  | MVN  Cond Rd    Op2            -- Rd := 0xFFFFFFFF EOR Op2
-  | MVNS Cond Rd    Op2            -- Rd := 0xFFFFFFFF EOR Op2
+  | MOV   Cond Rd    Op2            -- Rd := Op2
+  | MOVS  Cond Rd    Op2            -- Rd := Op2
+  | MVN   Cond Rd    Op2            -- Rd := 0xFFFFFFFF EOR Op2
+  | MVNS  Cond Rd    Op2            -- Rd := 0xFFFFFFFF EOR Op2
   -- Compare operations.
-  | CMP  Cond    Rn Op2            -- Update CPSR flags on Rn – Op2
-  | CMN  Cond    Rn Op2            -- Update CPSR flags on Rn + Op2
+  | CMP   Cond    Rn Op2            -- Update CPSR flags on Rn – Op2
+  | CMN   Cond    Rn Op2            -- Update CPSR flags on Rn + Op2
   -- Logical operations.
-  | TST  Cond    Rn Op2            -- Update CPSR flags on Rn AND Op2
-  | TEQ  Cond    Rn Op2            -- Update CPSR flags on Rn EOR Op2
-  | AND  Cond Rd Rn Op2            -- Rd := Rn AND Op2
-  | EOR  Cond Rd Rn Op2            -- Rd := Rn EOR Op2
-  | ORR  Cond Rd Rn Op2            -- Rd := Rn ORR Op2
-  | ORN  Cond Rd Rn Op2            -- Rd := Rn ORN Op2
-  | BIC  Cond Rd Rn Op2            -- Rd := Rn AND NOT Op2
+  | TST   Cond    Rn Op2            -- Update CPSR flags on Rn AND Op2
+  | TEQ   Cond    Rn Op2            -- Update CPSR flags on Rn EOR Op2
+  | AND   Cond Rd Rn Op2            -- Rd := Rn AND Op2
+  | EOR   Cond Rd Rn Op2            -- Rd := Rn EOR Op2
+  | ORR   Cond Rd Rn Op2            -- Rd := Rn ORR Op2
+  | ORN   Cond Rd Rn Op2            -- Rd := Rn ORN Op2
+  | BIC   Cond Rd Rn Op2            -- Rd := Rn AND NOT Op2
   -- Swap instruction.
-  | SWP  Cond Rd Rm Rn        -- temp := [Rn], [Rn] := Rm, Rd := temp
-  | SWPB Cond Rd Rm Rn        -- temp := ZeroExtend([Rn][7:0]), [Rn][7:0] := Rm[7:0], Rd := temp
+  | SWP   Cond Rd Rm Rn             -- temp := [Rn], [Rn] := Rm, Rd := temp
+  | SWPB  Cond Rd Rm Rn             -- temp := ZeroExtend([Rn][7:0]), [Rn][7:0] := Rm[7:0], Rd := temp
   -- Software interrupt instruction.
-  | SWI  Cond Imm
+  | SWI   Cond Imm
   -- Jump instructions.
-  | B    Cond Label           -- R15 := label
+  | B     Cond Label                -- R15 := label
+  -- Floating point instructions.
+  | VADD  Cond Prec Fd Fn Fm
+  | VSUB  Cond Prec Fd Fn Fm
+  | VDIV  Cond Prec Fd Fn Fm
+  | VABS  Cond Prec Fd    Fm
+  | VNEG  Cond Prec Fd    Fm
+  | VSQRT Cond Prec Fd    Fm
+  | VCMP  Cond Prec Fd    Fm
 
 instance Instruction Instr where
   regUsageOfInstr         = arm_regUsageOfInstr
